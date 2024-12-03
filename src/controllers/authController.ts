@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { createUser } from "../models/userModel";
 import { supabase } from "../utils/supabaseClient";
+import pool from "../db";
 
 export const registerUser = async (
   req: Request,
@@ -71,6 +72,41 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
 
     const { session, user } = data;
 
+    const userWithDetailsQuery = `
+      SELECT 
+        u.id, 
+        u.email, 
+        u.username, 
+        u.display_name, 
+        u.bio, 
+        u.avatar_url, 
+        u.cover_url, 
+        u.is_verified, 
+        u.is_private,
+        u.created_at, 
+        u.updated_at,
+        ua.is_admin,
+        um.id_number,
+        um.address,
+        um.birth_date,
+        um.zone,
+        um.latest_education
+      FROM users u
+      LEFT JOIN users_admin ua ON u.id = ua.user_id
+      LEFT JOIN users_member um ON u.id = um.user_id
+      WHERE u.id = $1;
+    `;
+    const userWithDetailsResult = await pool.query(userWithDetailsQuery, [
+      user.id,
+    ]);
+
+    if (userWithDetailsResult.rowCount === 0) {
+      res.status(404).json({ message: "User not found." });
+      return;
+    }
+
+    const userDetail = userWithDetailsResult.rows[0];
+
     // Return Supabase tokens directly for API usage
     res.json({
       accessToken: session.access_token, // Use as the main JWT for your API
@@ -78,7 +114,10 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
       user: {
         id: user.id,
         email: user.email,
-        isVerified: user.email_confirmed_at != null,
+        // isVerified: user.email_confirmed_at != null,
+        isVerified: userDetail?.is_verified,
+        isAdmin: userDetail?.is_admin,
+        name: userDetail?.display_name,
       },
     });
   } catch (err) {

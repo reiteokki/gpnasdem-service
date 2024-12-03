@@ -1,11 +1,14 @@
 import { Router } from "express";
 import {
+  acceptAsMember,
   followUser,
   getAllUsers,
   getFollowers,
   getFollowing,
+  getRegistrantById,
   getUserById,
   registerAsMember,
+  toggleAdminStatus,
   unfollowUser,
   updateProfile,
 } from "../controllers/userController";
@@ -22,5 +25,10 @@ router.post("/follow/:followingId", authenticate, followUser);
 router.delete("/unfollow/:followingId", authenticate, unfollowUser);
 router.get("/:id/followers", authenticate, getFollowers);
 router.get("/:id/following", authenticate, getFollowing);
+
+// admin
+router.get("/registrant/:id", authenticate, getRegistrantById);
+router.patch("/registrant/accept-member/:id", authenticate, acceptAsMember);
+router.post("/toggle-admin/:id", authenticate, toggleAdminStatus);
 
 export default router;

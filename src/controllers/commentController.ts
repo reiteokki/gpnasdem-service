@@ -234,7 +234,7 @@ export const likeComment = async (
   res: Response
 ): Promise<void> => {
   const userId = req.userId;
-  const { commentId } = req.params;
+  const { id: commentId } = req.params;
 
   try {
     const commentQuery = `
@@ -315,7 +315,7 @@ export const unlikeComment = async (
   res: Response
 ): Promise<void> => {
   const userId = req.userId;
-  const { commentId } = req.params;
+  const { id: commentId } = req.params;
 
   try {
     const likeExistsQuery = `
@@ -371,7 +371,7 @@ export const bookmarkComment = async (
   res: Response
 ): Promise<void> => {
   const userId = req.userId;
-  const { commentId } = req.params;
+  const { id: commentId } = req.params;
 
   try {
     const commentQuery = `
@@ -456,7 +456,7 @@ export const unbookmarkComment = async (
   res: Response
 ): Promise<void> => {
   const userId = req.userId;
-  const { commentId } = req.params;
+  const { id: commentId } = req.params;
 
   try {
     const bookmarkExistsQuery = `

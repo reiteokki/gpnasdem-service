@@ -1,6 +1,8 @@
 import { Router } from "express";
 import {
   createForum,
+  getAllForums,
+  getJoinedForums,
   getForumById,
   editForum,
   deleteForum,
@@ -14,6 +16,8 @@ const router = Router();
 router.post("/", upload, authenticate, createForum);
 router.post("/:forumId/join", authenticate, followForum);
 router.put("/:forumId/approve", authenticate, approveJoinRequest);
+router.get("/", upload, authenticate, getAllForums);
+router.get("/joined", upload, authenticate, getJoinedForums);
 router.get("/:id", authenticate, getForumById);
 router.put("/:id", upload, authenticate, editForum);
 router.delete("/:id", authenticate, deleteForum);

@@ -1,14 +1,24 @@
 import { Request, Response } from "express";
 import pool from "../db";
-import { promoteToMember } from "../models/userModel";
+import { createRegistration, promoteToMember } from "../models/userModel";
 import { supabaseAdmin } from "../utils/supabaseClient";
 import { SupabaseClient } from "@supabase/supabase-js";
 import { deleteFile, uploadFile } from "../utils/supabaseStorage";
+import { v4 as uuidv4 } from "uuid";
 
 export const registerAsMember = async (req: Request, res: Response) => {
   const client = req.supabase as SupabaseClient; // Supabase client from the request
 
-  const { birthPlace, birthDate, zone, latestEducation } = req.body;
+  const {
+    birthPlace,
+    birthDate,
+    zone,
+    latestEducation,
+    address,
+    nik,
+    phone,
+    referral,
+  } = req.body;
   const userId = req.userId;
 
   const idCardFile = (req.files as { id_card?: Express.Multer.File[] })
@@ -32,17 +42,91 @@ export const registerAsMember = async (req: Request, res: Response) => {
       );
     }
 
-    const member = await promoteToMember(
+    const registration = await createRegistration(
       userId,
       idCardUrl || "",
       birthPlace,
       birthDate,
       zone,
-      latestEducation
+      latestEducation,
+      address,
+      nik,
+      phone,
+      referral
     );
-    res.status(201).json(member);
+
+    res.status(201).json(registration);
   } catch (err) {
     console.log(err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+export const acceptAsMember = async (req: Request, res: Response) => {
+  const { id: registrantId } = req.params; // ID of the registrant
+  const userId = req.userId;
+
+  // Check if the user is an admin
+  const isAdminQuery = `
+  SELECT 1 
+  FROM users_admin 
+  WHERE user_id = $1
+`;
+  const isAdminResult = await pool.query(isAdminQuery, [userId]);
+  const isAdmin = isAdminResult?.rowCount && isAdminResult.rowCount > 0;
+
+  if (!isAdmin) {
+    res
+      .status(403)
+      .json({ message: "You are not authorized to access this resource." });
+    return;
+  }
+
+  try {
+    // Step 1: Retrieve the registrant by ID
+    const registrantQuery = `
+      SELECT 
+        ur.user_id,
+        ur.id_number,
+        ur.birth_place,
+        ur.birth_date,
+        ur.zone,
+        ur.latest_education,
+        ur.address,
+        ur.nik,
+        ur.phone_number,
+        ur.referral
+      FROM users_registration ur
+      WHERE ur.user_id = $1
+    `;
+    const registrantResult = await pool.query(registrantQuery, [registrantId]);
+
+    if (registrantResult.rowCount === 0) {
+      res.status(404).json({ message: "Registrant not found." });
+      return;
+    }
+
+    const registrant = registrantResult.rows[0];
+    console.log(registrant);
+
+    // Step 2: Promote the registrant to a member
+    const promotedMember = await promoteToMember(
+      registrant.user_id,
+      registrant.id_number,
+      registrant.birth_place,
+      registrant.birth_date,
+      registrant.zone,
+      registrant.latest_education,
+      registrant.address,
+      registrant.nik,
+      registrant.phone_number,
+      registrant.referral
+    );
+
+    // Step 3: Respond with the result
+    res.status(201).json(promotedMember);
+  } catch (err) {
+    console.error("Error promoting registrant to member:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -51,99 +135,140 @@ export const getAllUsers = async (
   req: Request,
   res: Response
 ): Promise<void> => {
-  const userId = req.userId; // Extracted from JWT in middleware
-  const { page = 1, size = 10, member } = req.query; // Pagination and filter params
+  const { page = 1, size = 10, status } = req.query; // Pagination and filter params
 
   try {
-    // Check if the user is an admin
-    const isAdminQuery = `
-      SELECT 1 
-      FROM users_admin 
-      WHERE user_id = $1
-    `;
-    const isAdminResult = await pool.query(isAdminQuery, [userId]);
-    const isAdmin = isAdminResult?.rowCount && isAdminResult.rowCount > 0;
-
-    if (!isAdmin) {
-      res
-        .status(403)
-        .json({ message: "You are not authorized to access this resource." });
-      return;
-    }
-
     // Pagination logic
     const offset = (Number(page) - 1) * Number(size);
     const limit = Number(size);
 
-    // Base query
-    let baseQuery = `
-      SELECT 
-        u.id, 
-        u.email, 
-        u.username, 
-        u.display_name, 
-        u.bio, 
-        u.avatar_url, 
-        u.cover_url, 
-        u.is_verified, 
-        u.is_private,
-        u.created_at, 
-        u.updated_at
-    `;
-    let joinClause = "";
-    let whereClause = "";
+    // Query logic based on status filter
+    let finalQuery = "";
+    let countQuery = "";
 
-    // Optional filter for member
-    if (member === "true") {
-      joinClause = `
-        LEFT JOIN users_member um ON u.id = um.user_id
+    if (status === "member") {
+      // Member query logic
+      finalQuery = `
+        SELECT 
+          u.id AS user_id,
+          u.email,
+          u.username,
+          u.display_name,
+          u.bio,
+          u.avatar_url,
+          u.cover_url,
+          u.is_verified,
+          u.is_private,
+          um.id_number,
+          um.birth_place,
+          um.birth_date,
+          um.zone,
+          um.latest_education,
+          um.address,
+          um.nik,
+          um.phone_number,
+          um.referral,
+          um.position,
+          CASE 
+            WHEN ua.user_id IS NOT NULL THEN true 
+            ELSE false 
+          END AS is_admin,
+          u.created_at,
+          u.updated_at,
+          um.status
+        FROM users u
+        INNER JOIN users_member um ON u.id = um.user_id
         LEFT JOIN users_admin ua ON u.id = ua.user_id
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
       `;
-      whereClause = `
-        WHERE um.user_id IS NOT NULL OR ua.user_id IS NOT NULL
+
+      countQuery = `
+        SELECT COUNT(*) AS total
+        FROM users u
+        INNER JOIN users_member um ON u.id = um.user_id
       `;
-    } else if (member === "false") {
-      joinClause = `
-        LEFT JOIN users_member um ON u.id = um.user_id
+    } else if (status === "registrant") {
+      // Registrant query logic
+      finalQuery = `
+        SELECT 
+          u.id AS user_id,
+          u.email,
+          u.username,
+          u.display_name,
+          u.bio,
+          u.avatar_url,
+          u.cover_url,
+          u.is_verified,
+          u.is_private,
+          ur.id_number,
+          ur.birth_place,
+          ur.birth_date,
+          ur.zone,
+          ur.latest_education,
+          ur.address,
+          ur.nik,
+          ur.phone_number,
+          ur.referral,
+          CASE 
+            WHEN ua.user_id IS NOT NULL THEN true 
+            ELSE false 
+          END AS is_admin,
+          u.created_at,
+          u.updated_at,
+          ur.status
+        FROM users u
+        INNER JOIN users_registration ur ON u.id = ur.user_id
         LEFT JOIN users_admin ua ON u.id = ua.user_id
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
       `;
-      whereClause = `
-        WHERE um.user_id IS NULL AND ua.user_id IS NULL
+
+      countQuery = `
+        SELECT COUNT(*) AS total
+        FROM users u
+        INNER JOIN users_registration ur ON u.id = ur.user_id
       `;
+    } else {
+      // Invalid status filter
+      res.status(400).json({ message: "Invalid status filter." });
+      return;
     }
 
-    // Combine query parts
-    const finalQuery = `
-      ${baseQuery}
-      FROM users u
-      ${joinClause}
-      ${whereClause}
-      ORDER BY u.created_at DESC
-      LIMIT $1 OFFSET $2
-    `;
-
+    // Execute paginated query and count query
     const usersResult = await pool.query(finalQuery, [limit, offset]);
-
-    // Count query for total results
-    const countQuery = `
-      SELECT COUNT(*) AS total
-      FROM users u
-      ${joinClause}
-      ${whereClause}
-    `;
     const countResult = await pool.query(countQuery);
 
-    const total = parseInt(countResult.rows[0].total, 10);
+    // Fetch additional metrics
+    const metricsQuery = `
+      SELECT 
+        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS "totalActive",
+        SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) AS "totalInactive",
+        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS "totalRejected",
+        SUM(CASE WHEN zone = 'DPD' THEN 1 ELSE 0 END) AS "totalDpd",
+        SUM(CASE WHEN zone = 'DPW' THEN 1 ELSE 0 END) AS "totalDpw",
+        SUM(CASE WHEN zone = 'DPP' THEN 1 ELSE 0 END) AS "totalDpp"
+      FROM ${status === "member" ? "users_member" : "users_registration"}
+    `;
+
+    const metricsResult = await pool.query(metricsQuery);
+
+    // Combine metrics with totalData
+    const metrics = {
+      totalData: parseInt(countResult.rows[0].total, 10), // Add totalData
+      ...metricsResult.rows[0],
+    };
+
+    const total = metrics.totalData; // Total data count
     const totalPages = Math.ceil(total / limit);
 
     res.status(200).json({
-      users: usersResult.rows,
-      pagination: {
-        total,
-        totalPages,
-        currentPage: Number(page),
-        pageSize: limit,
-      },
+      data: usersResult.rows,
+      totalData: total,
+      totalPages,
+      page: Number(page),
+      pageSize: limit,
+      metrics, // Include all metrics in the response
     });
   } catch (error) {
     console.error("Error fetching users:", error);
@@ -188,11 +313,15 @@ export const getUserById = async (
         u.cover_url, 
         u.is_verified, 
         u.is_private,
+        CASE 
+          WHEN ua.user_id IS NOT NULL THEN true 
+          ELSE false 
+        END AS is_admin,
         u.created_at, 
         u.updated_at,
         ua.is_admin,
         um.id_number,
-        um.birth_place,
+        um.address,
         um.birth_date,
         um.zone,
         um.latest_education,
@@ -376,7 +505,7 @@ export const updateProfile = async (
         u.updated_at,
         ua.is_admin,
         um.id_number,
-        um.birth_place,
+        um.address,
         um.birth_date,
         um.zone,
         um.latest_education
@@ -428,13 +557,19 @@ export const followUser = async (
       return;
     }
 
+    const userFollowsId = uuidv4();
+
     // Insert the follow relationship
     const followQuery = `
-      INSERT INTO user_follows (follower_id, following_id, created_at)
-      VALUES ($1, $2, NOW())
+      INSERT INTO user_follows (id, follower_id, following_id, created_at)
+      VALUES ($1, $2, $3, NOW())
       RETURNING *;
     `;
-    const followResult = await pool.query(followQuery, [userId, followingId]);
+    const followResult = await pool.query(followQuery, [
+      userFollowsId,
+      userId,
+      followingId,
+    ]);
 
     res.status(201).json({
       message: "Followed successfully.",
@@ -483,11 +618,11 @@ export const getFollowers = async (
 ): Promise<void> => {
   const userId = req.userId; // Extracted from JWT in middleware
   const { id } = req.params; // User ID whose followers are being retrieved
-  const { page = 1, size = 10 } = req.query; // Pagination parameters
+  const { page = 1, limit = 10 } = req.query; // Pagination parameters
 
   try {
-    const offset = (Number(page) - 1) * Number(size);
-    const limit = Number(size);
+    const offset = (Number(page) - 1) * Number(limit);
+    const actualLimit = Number(limit);
 
     const followersQuery = `
       SELECT 
@@ -512,7 +647,7 @@ export const getFollowers = async (
     const followersResult = await pool.query(followersQuery, [
       userId,
       id,
-      limit,
+      actualLimit,
       offset,
     ]);
 
@@ -524,16 +659,14 @@ export const getFollowers = async (
     const countResult = await pool.query(countQuery, [id]);
 
     const total = parseInt(countResult.rows[0].total, 10);
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.ceil(total / actualLimit);
 
     res.status(200).json({
       followers: followersResult.rows,
-      pagination: {
-        total,
-        totalPages,
-        currentPage: Number(page),
-        pageSize: limit,
-      },
+      totalData: total,
+      totalPages,
+      currentPage: Number(page),
+      pageSize: limit,
     });
   } catch (error) {
     console.error("Error fetching followers:", error);
@@ -547,11 +680,11 @@ export const getFollowing = async (
 ): Promise<void> => {
   const userId = req.userId; // Extracted from JWT in middleware
   const { id } = req.params; // User ID whose following list is being retrieved
-  const { page = 1, size = 10 } = req.query; // Pagination parameters
+  const { page = 1, limit = 10 } = req.query; // Pagination parameters
 
   try {
-    const offset = (Number(page) - 1) * Number(size);
-    const limit = Number(size);
+    const offset = (Number(page) - 1) * Number(limit);
+    const actualLimit = Number(limit);
 
     const followingQuery = `
       SELECT 
@@ -576,7 +709,7 @@ export const getFollowing = async (
     const followingResult = await pool.query(followingQuery, [
       userId,
       id,
-      limit,
+      actualLimit,
       offset,
     ]);
 
@@ -588,19 +721,144 @@ export const getFollowing = async (
     const countResult = await pool.query(countQuery, [id]);
 
     const total = parseInt(countResult.rows[0].total, 10);
-    const totalPages = Math.ceil(total / limit);
+    const totalPages = Math.ceil(total / actualLimit);
 
     res.status(200).json({
       following: followingResult.rows,
-      pagination: {
-        total,
-        totalPages,
-        currentPage: Number(page),
-        pageSize: limit,
-      },
+      totalData: total,
+      totalPages,
+      currentPage: Number(page),
+      pageSize: actualLimit,
     });
   } catch (error) {
     console.error("Error fetching following:", error);
+    res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+export const getRegistrantById = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const userId = req.userId; // Extracted from JWT in middleware
+  const { id } = req.params; // Registrant ID to fetch
+
+  try {
+    // Check if the user is an admin
+    const isAdminQuery = `
+      SELECT 1 
+      FROM users_admin 
+      WHERE user_id = $1
+    `;
+    const isAdminResult = await pool.query(isAdminQuery, [userId]);
+    const isAdmin = isAdminResult?.rowCount && isAdminResult.rowCount > 0;
+
+    if (!isAdmin) {
+      res
+        .status(403)
+        .json({ message: "You are not authorized to access this resource." });
+      return;
+    }
+
+    // Query to get the registrant by ID
+    const query = `
+      SELECT 
+        u.id AS user_id,
+        u.email,
+        u.username,
+        u.display_name,
+        u.bio,
+        u.avatar_url,
+        u.cover_url,
+        u.is_verified,
+        u.is_private,
+        ur.id_number,
+        CASE 
+          WHEN ua.user_id IS NOT NULL THEN true 
+          ELSE false 
+        END AS is_admin,
+        ur.birth_place,
+        ur.birth_date,
+        ur.zone,
+        ur.latest_education,
+        ur.address,
+        ur.nik,
+        ur.phone_number,
+        ur.referral,
+        ur.status,
+        ur.created_at AS registration_created_at,
+        u.updated_at AS registration_updated_at
+      FROM users u
+      LEFT JOIN users_admin ua ON u.id = ua.user_id
+      RIGHT JOIN users_registration ur ON u.id = ur.user_id
+      WHERE ur.user_id = $1
+    `;
+
+    const result = await pool.query(query, [id]);
+
+    if (result.rowCount === 0) {
+      res.status(404).json({ message: "Registrant not found." });
+      return;
+    }
+
+    res.status(200).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error fetching registrant by ID:", error);
+    res.status(500).json({ message: "Internal server error." });
+  }
+};
+
+export const toggleAdminStatus = async (req: Request, res: Response) => {
+  const { id: passedUserId } = req.params; // Extract userId from request parameters
+  const userId = req.userId;
+
+  try {
+    // Check if the user is an admin
+    const isAdminQuery = `
+      SELECT 1 
+      FROM users_admin 
+      WHERE user_id = $1
+      `;
+    const isAdminResult = await pool.query(isAdminQuery, [userId]);
+
+    const isAdmin = isAdminResult?.rowCount && isAdminResult.rowCount > 0;
+
+    if (!isAdmin) {
+      res
+        .status(403)
+        .json({ message: "You are not authorized to access this resource." });
+      return;
+    }
+
+    // Check if the user is already an admin
+    const checkAdminQuery = `
+      SELECT 1 
+      FROM users_admin 
+      WHERE user_id = $1
+    `;
+    const adminResult = await pool.query(checkAdminQuery, [passedUserId]);
+
+    if (adminResult.rowCount && adminResult.rowCount > 0) {
+      // User is already an admin, remove them from the users_admin table
+      const deleteAdminQuery = `
+        DELETE FROM users_admin 
+        WHERE user_id = $1
+      `;
+      await pool.query(deleteAdminQuery, [passedUserId]);
+
+      res.status(200).json({ message: "Admin status removed successfully." });
+    } else {
+      // User is not an admin, insert them into the users_admin table
+      const insertAdminQuery = `
+        INSERT INTO users_admin (user_id) 
+        VALUES ($1)
+      `;
+      await pool.query(insertAdminQuery, [passedUserId]);
+
+      res.status(200).json({ message: "Admin status granted successfully." });
+    }
+  } catch (error) {
+    console.error("Error toggling admin status:", error);
     res.status(500).json({ message: "Internal server error." });
   }
 };

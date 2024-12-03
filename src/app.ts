@@ -6,6 +6,7 @@ import userRoutes from "./routes/userRoutes";
 import forumRoutes from "./routes/forumRoutes";
 import postRoutes from "./routes/postRoutes";
 import commentRoutes from "./routes/commentRoutes";
+import agendaRoutes from "./routes/agendaRoutes";
 
 // Load environment variables
 dotenv.config();
@@ -46,6 +47,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/forums", forumRoutes);
 app.use("/api/post", postRoutes);
 app.use("/api/comment", commentRoutes);
+app.use("/api/agenda", agendaRoutes);
 
 // Health check endpoint
 // app.get("/api/health", (req, res) => {

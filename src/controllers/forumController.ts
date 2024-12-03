@@ -38,7 +38,12 @@ export const createForum = async (
     return;
   }
 
+  const dbClient = await pool.connect();
+
   try {
+    // Start transaction
+    await dbClient.query("BEGIN");
+
     const bucketName = "forum-media"; // Dynamic bucket name passed to the upload utility
     const forumId = uuidv4(); // Generate a unique ID for the forum before uploading files
 
@@ -72,13 +77,13 @@ export const createForum = async (
     }
 
     // Insert forum into the database
-    const query = `
+    const forumInsertQuery = `
       INSERT INTO forums (
         id, creator_id, name, description, avatar_url, cover_url, is_coi
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, name, description, avatar_url, cover_url, is_coi, created_at, updated_at;
     `;
-    const values = [
+    const forumValues = [
       forumId,
       creatorId,
       name,
@@ -88,21 +93,37 @@ export const createForum = async (
       is_coi,
     ];
 
-    const result = await pool.query(query, values);
-    const forum = result.rows[0];
+    const forumResult = await dbClient.query(forumInsertQuery, forumValues);
+    const forum = forumResult.rows[0];
 
     // Add the creator to forum_members with the 'core' role
+    const memberId = uuidv4();
     const insertMemberQuery = `
-      INSERT INTO forum_members (forum_id, user_id, role, is_approved, approved_at, joined_at)
-      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+      INSERT INTO forum_members (id, forum_id, user_id, role, is_approved, approved_at, joined_at)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
     `;
-    const memberValues = [forumId, creatorId, "core", true];
-    await pool.query(insertMemberQuery, memberValues);
+    const memberValues = [memberId, forumId, creatorId, "core", true];
+    await dbClient.query(insertMemberQuery, memberValues);
+
+    // Increment members_count in the forums table
+    const incrementMembersQuery = `
+      UPDATE forums
+      SET members_count = members_count + 1
+      WHERE id = $1;
+    `;
+    await dbClient.query(incrementMembersQuery, [forumId]);
+
+    // Commit transaction
+    await dbClient.query("COMMIT");
 
     res.status(201).json(forum);
   } catch (err) {
+    // Rollback transaction in case of an error
+    await dbClient.query("ROLLBACK");
     console.error("Error creating forum:", err);
     res.status(500).json({ message: "Internal server error" });
+  } finally {
+    dbClient.release();
   }
 };
 
@@ -243,11 +264,169 @@ export const approveJoinRequest = async (
   }
 };
 
+export const getAllForums = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const { page = 1, limit = 10, isCoi } = req.query;
+
+  const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
+
+  try {
+    // Validate `isCoi` query param
+    const validIsCoi =
+      isCoi === "true" || isCoi === "false" || isCoi === undefined;
+    if (!validIsCoi) {
+      res
+        .status(400)
+        .json({ message: "'isCoi' must be 'true' or 'false' if provided." });
+      return;
+    }
+
+    // Build filter for `isCoi`
+    const filters = isCoi ? `WHERE f.is_coi = $1` : "";
+    const values = isCoi
+      ? [isCoi === "true", parseInt(limit as string), offset]
+      : [parseInt(limit as string), offset];
+
+    // Query for total count of forums
+    const totalCountQuery = `
+      SELECT COUNT(*) AS total
+      FROM forums f
+      ${filters};
+    `;
+    const totalCountResult = await pool.query(
+      totalCountQuery,
+      isCoi ? [isCoi === "true"] : []
+    );
+    const totalData = parseInt(totalCountResult.rows[0].total, 10);
+
+    // Query for paginated forums with members count
+    const forumsQuery = `
+      SELECT 
+        f.id, 
+        f.name, 
+        f.description, 
+        f.avatar_url, 
+        f.cover_url, 
+        f.is_coi, 
+        f.created_at, 
+        f.updated_at,
+        COALESCE(members_count.members_count, 0) AS members_count
+      FROM forums f
+      LEFT JOIN (
+        SELECT forum_id, COUNT(user_id) AS members_count
+        FROM forum_members
+        GROUP BY forum_id
+      ) AS members_count ON members_count.forum_id = f.id
+      ${filters}
+      ORDER BY f.created_at DESC
+      LIMIT $${isCoi ? 2 : 1} OFFSET $${isCoi ? 3 : 2};
+    `;
+    const forumsResult = await pool.query(forumsQuery, values);
+
+    res.status(200).json({
+      forums: forumsResult.rows,
+      totalData,
+      page: parseInt(page as string),
+      limit: parseInt(limit as string),
+    });
+  } catch (err) {
+    console.error("Error fetching forums:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+export const getJoinedForums = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const { page = 1, limit = 10, isCoi, role } = req.query;
+
+  const userId = req.userId; // Extracted from middleware
+  const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
+
+  try {
+    // Validate 'isCoi' query parameter
+    const validIsCoi =
+      isCoi === "true" || isCoi === "false" || isCoi === undefined;
+    if (!validIsCoi) {
+      res
+        .status(400)
+        .json({ message: "'isCoi' must be 'true' or 'false' if provided." });
+      return;
+    }
+
+    // Build filters dynamically
+    const filters = [`fm.user_id = $1`]; // Always filter by user_id
+    const values: any[] = [userId];
+
+    if (isCoi !== undefined) {
+      filters.push(`f.is_coi = $${values.length + 1}`);
+      values.push(isCoi === "true");
+    }
+
+    if (role) {
+      // Include role filter if `role` is provided
+      filters.push(`fm.role = $${values.length + 1}`);
+      values.push(role);
+    }
+
+    const whereClause = filters.join(" AND ");
+
+    // Get total count of forums
+    const totalCountQuery = `
+      SELECT COUNT(*) AS total
+      FROM forums f
+      INNER JOIN forum_members fm ON fm.forum_id = f.id
+      WHERE ${whereClause};
+    `;
+    const totalCountResult = await pool.query(totalCountQuery, values);
+    const totalData = parseInt(totalCountResult.rows[0].total, 10);
+
+    // Add pagination values
+    values.push(parseInt(limit as string));
+    values.push(offset);
+
+    // Get forums
+    const forumsQuery = `
+      SELECT 
+        f.id, 
+        f.name, 
+        f.description, 
+        f.avatar_url, 
+        f.cover_url, 
+        f.is_coi, 
+        f.created_at, 
+        f.updated_at,
+        COUNT(fm.user_id) AS members_count
+      FROM forums f
+      INNER JOIN forum_members fm ON fm.forum_id = f.id
+      WHERE ${whereClause}
+      GROUP BY f.id
+      ORDER BY f.created_at DESC
+      LIMIT $${values.length - 1} OFFSET $${values.length};
+    `;
+    const forumsResult = await pool.query(forumsQuery, values);
+
+    res.status(200).json({
+      forums: forumsResult.rows,
+      totalData,
+      page: parseInt(page as string),
+      limit: parseInt(limit as string),
+    });
+  } catch (err) {
+    console.error("Error fetching joined forums:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 export const getForumById = async (
   req: Request,
   res: Response
 ): Promise<void> => {
   const { id } = req.params;
+  const loggedInUserId = req.userId; // Assuming the logged-in user ID is available in the request
 
   if (!id) {
     res.status(400).json({ message: "Forum ID is required" });
@@ -255,20 +434,51 @@ export const getForumById = async (
   }
 
   try {
+    // Query to fetch the forum details, and check if the logged-in user is a core member or following the forum
     const query = `
-      SELECT id, creator_id, name, description, avatar_url, cover_url, is_coi, created_at, updated_at
-      FROM forums
-      WHERE id = $1;
+      SELECT 
+        f.id, f.creator_id, f.name, f.description, f.avatar_url, f.cover_url, 
+        f.is_coi, f.created_at, f.updated_at,
+        -- Check if the logged-in user is a core member
+        CASE 
+          WHEN fm.role = 'core' THEN TRUE
+          ELSE FALSE
+        END AS is_core_member,
+        -- Check if the logged-in user is following the forum (regardless of role)
+        CASE
+          WHEN fm.user_id IS NOT NULL THEN TRUE
+          ELSE FALSE
+        END AS is_following,
+        -- Get the followers count
+        (SELECT COUNT(*) FROM forum_members WHERE forum_id = f.id) AS followers_count
+      FROM forums f
+      LEFT JOIN forum_members fm ON f.id = fm.forum_id AND fm.user_id = $1
+      WHERE f.id = $2;
     `;
 
-    const result = await pool.query(query, [id]);
+    const result = await pool.query(query, [loggedInUserId, id]);
 
     if (result.rows.length === 0) {
       res.status(404).json({ message: "Forum not found" });
       return;
     }
 
-    res.status(200).json(result.rows[0]);
+    // Return forum details along with additional information
+    const forum = result.rows[0];
+    res.status(200).json({
+      id: forum.id,
+      creator_id: forum.creator_id,
+      name: forum.name,
+      description: forum.description,
+      avatar_url: forum.avatar_url,
+      cover_url: forum.cover_url,
+      is_coi: forum.is_coi,
+      created_at: forum.created_at,
+      updated_at: forum.updated_at,
+      is_core_member: forum.is_core_member,
+      is_following: forum.is_following,
+      followers_count: forum.followers_count,
+    });
   } catch (err) {
     console.error("Error fetching forum:", err);
     res.status(500).json({ message: "Internal server error" });
