@@ -90,10 +90,12 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
         um.address,
         um.birth_date,
         um.zone,
-        um.latest_education
+        um.latest_education,
+        ur.id as registration_id
       FROM users u
       LEFT JOIN users_admin ua ON u.id = ua.user_id
       LEFT JOIN users_member um ON u.id = um.user_id
+      LEFT JOIN users_registration ur ON U.id = ur.user_id
       WHERE u.id = $1;
     `;
     const userWithDetailsResult = await pool.query(userWithDetailsQuery, [
@@ -106,6 +108,7 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
     }
 
     const userDetail = userWithDetailsResult.rows[0];
+    console.log(userDetail);
 
     // Return Supabase tokens directly for API usage
     res.json({
@@ -115,6 +118,7 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
         id: user.id,
         email: user.email,
         // isVerified: user.email_confirmed_at != null,
+        registrationId: userDetail?.registration_id,
         isVerified: userDetail?.is_verified,
         isAdmin: userDetail?.is_admin,
         name: userDetail?.display_name,
