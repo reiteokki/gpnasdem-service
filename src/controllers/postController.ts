@@ -109,6 +109,8 @@ export const createPost = async (
         }
         additionalData = personalResult.rows[0];
 
+        await client.query("COMMIT");
+
         // Upload media files (if any)
         if (mediaFiles && mediaFiles.length > 0) {
           const uploadedMedia = await uploadPostMedia(
@@ -283,63 +285,83 @@ export const getPosts = async (req: Request, res: Response): Promise<void> => {
     // Fetch paginated posts
     const postsQuery = `
       SELECT 
-        p.id, p.original_post_id, p.user_id, p.forum_id, p.type, p.likes_count, p.comments_count, 
-        p.shares_count, p.bookmarks_count, p.created_at, p.updated_at,
-        u.display_name AS author_name, u.avatar_url AS author_avatar,
-        um.position AS author_position,
-        pp.content AS personal_content,
-        po.title AS article_title, po.content AS article_content,
-        pol.question, pol.start_datetime, pol.end_datetime, pol.is_anonymous, pol.allow_multiple_choices,
-        -- Check if the user has liked, shared, commented, or bookmarked the post
-        EXISTS (
-          SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $4
-        ) AS has_liked,
-        CASE
-          WHEN EXISTS (
-            SELECT 1
+          p.id, p.original_post_id, p.user_id, p.forum_id, p.type, p.likes_count, 
+          p.comments_count, p.shares_count, p.bookmarks_count, 
+          p.created_at, p.updated_at,
+          
+          -- Current post author details
+          u.display_name AS author_name, 
+          u.avatar_url AS author_avatar,
+          um.position AS author_position,
+
+          -- Original post author details (if original_post_id exists)
+          uo.display_name AS original_author_name,
+          uo.avatar_url AS original_author_avatar,
+          umo.user_id AS original_author_user_id,
+          umo.position AS original_author_position,
+
+          pp.content AS personal_content,
+          po.title AS article_title, 
+          po.content AS article_content,
+          pol.question, pol.start_datetime, pol.end_datetime, pol.is_anonymous, pol.allow_multiple_choices,
+
+          -- User interactions
+          EXISTS (
+            SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $4
+          ) AS has_liked,
+
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM posts p2 WHERE p2.original_post_id = p.id AND p2.user_id = $4
+            ) THEN TRUE ELSE FALSE
+          END AS has_shared,
+
+          (
+            SELECT p2.id
             FROM posts p2
-            WHERE p2.original_post_id = p.id
-              AND p2.user_id = $4
-          ) THEN TRUE
-          ELSE FALSE
-        END AS has_shared,
-        (
-          SELECT p2.id
-          FROM posts p2
-          WHERE p2.original_post_id = p.id
-            AND p2.user_id = $4
-          LIMIT 1
-        ) AS shared_post_id,
-        (
-          SELECT 
-            CASE 
-              WHEN pp2.content IS NOT NULL THEN 'quote'
-              ELSE 'repost'
-            END
-          FROM posts p2
-          LEFT JOIN posts_personal pp2 ON p2.id = pp2.post_id
-          WHERE p2.original_post_id = p.id
-            AND p2.user_id = $4
-          LIMIT 1
-        ) AS shared_type, -- 'quote' or 'repost' based on content presence
-        EXISTS (
-          SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = $4
-        ) AS has_commented,
-        EXISTS (
-          SELECT 1 FROM post_bookmarks pb WHERE pb.post_id = p.id AND pb.user_id = $4
-        ) AS has_bookmarked
-      FROM posts p
-      LEFT JOIN posts_personal pp ON p.id = pp.post_id
-      LEFT JOIN posts_article po ON p.id = po.post_id
-      LEFT JOIN posts_polling pol ON p.id = pol.post_id
-      LEFT JOIN users u ON p.user_id = u.id
-      LEFT JOIN users_member um ON p.user_id = um.user_id
-      WHERE ($1::TEXT IS NULL OR p.type = $1)
-        AND ($2::UUID IS NULL OR p.forum_id = $2)
-        AND ($3::UUID IS NULL OR p.user_id = $3)  -- Filter by userId if provided
-        AND (($5::TIMESTAMP IS NULL AND $6::UUID IS NULL) OR (p.created_at, p.id) < ($5, $6))
-      ORDER BY p.created_at DESC, p.id DESC
-      LIMIT $7 OFFSET $8;
+            WHERE p2.original_post_id = p.id AND p2.user_id = $4
+            LIMIT 1
+          ) AS shared_post_id,
+
+          (
+            SELECT 
+              CASE 
+                WHEN pp2.content IS NOT NULL THEN 'quote'
+                ELSE 'repost'
+              END
+            FROM posts p2
+            LEFT JOIN posts_personal pp2 ON p2.id = pp2.post_id
+            WHERE p2.original_post_id = p.id AND p2.user_id = $4
+            LIMIT 1
+          ) AS shared_type, -- 'quote' or 'repost' based on content presence
+
+          EXISTS (
+            SELECT 1 FROM comments c WHERE c.post_id = p.id AND c.user_id = $4
+          ) AS has_commented,
+
+          EXISTS (
+            SELECT 1 FROM post_bookmarks pb WHERE pb.post_id = p.id AND pb.user_id = $4
+          ) AS has_bookmarked
+
+        FROM posts p
+        LEFT JOIN posts_personal pp ON p.id = pp.post_id
+        LEFT JOIN posts_article po ON p.id = po.post_id
+        LEFT JOIN posts_polling pol ON p.id = pol.post_id
+        LEFT JOIN users u ON p.user_id = u.id
+        LEFT JOIN users_member um ON p.user_id = um.user_id
+
+        -- Join for original post author details
+        LEFT JOIN posts op ON p.original_post_id = op.id
+        LEFT JOIN users uo ON op.user_id = uo.id
+        LEFT JOIN users_member umo ON op.user_id = umo.user_id
+
+        WHERE ($1::TEXT IS NULL OR p.type = $1)
+          AND ($2::UUID IS NULL OR p.forum_id = $2)
+          AND ($3::UUID IS NULL OR p.user_id = $3)  
+          AND (($5::TIMESTAMP IS NULL AND $6::UUID IS NULL) OR (p.created_at, p.id) < ($5, $6))
+
+        ORDER BY p.created_at DESC, p.id DESC
+        LIMIT $7 OFFSET $8;
     `;
 
     const postsResult = await pool.query(postsQuery, [
@@ -435,7 +457,7 @@ export const getPostById = async (
         p.id, p.user_id, p.original_post_id, p.forum_id, p.type, p.likes_count, p.comments_count, 
         p.shares_count, p.bookmarks_count, p.created_at, p.updated_at,
         u.display_name AS author_name, u.avatar_url AS author_avatar, 
-        f.name AS forum_name, f.avatar_url AS forum_avatar
+        f.name AS forum_name, f.avatar_url AS forum_avatar,
       FROM posts p
       LEFT JOIN users u ON p.user_id = u.id
       LEFT JOIN forums f ON p.forum_id = f.id
