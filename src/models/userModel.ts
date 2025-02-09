@@ -129,7 +129,7 @@ export const promoteToMember = async (
     // Commit the transaction
     await client.query("COMMIT");
 
-    console.log("Insert result:", memberResult);
+    // console.log("Insert result:", memberResult);
     return memberResult.rows[0];
   } catch (err) {
     // Rollback the transaction on error

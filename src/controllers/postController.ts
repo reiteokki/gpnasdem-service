@@ -457,7 +457,7 @@ export const getPostById = async (
         p.id, p.user_id, p.original_post_id, p.forum_id, p.type, p.likes_count, p.comments_count, 
         p.shares_count, p.bookmarks_count, p.created_at, p.updated_at,
         u.display_name AS author_name, u.avatar_url AS author_avatar, 
-        f.name AS forum_name, f.avatar_url AS forum_avatar,
+        f.name AS forum_name, f.avatar_url AS forum_avatar
       FROM posts p
       LEFT JOIN users u ON p.user_id = u.id
       LEFT JOIN forums f ON p.forum_id = f.id

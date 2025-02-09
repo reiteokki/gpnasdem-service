@@ -134,56 +134,139 @@ export const followForum = async (
   const { forumId } = req.params;
   const userId = req.userId;
 
+  const id = uuidv4();
+
   if (!userId || !forumId) {
     res.status(400).json({ message: "User ID and Forum ID are required" });
     return;
   }
 
+  // Get a client from the pool to start a transaction.
+  const client = await pool.connect();
+
   try {
-    // Check if the user has already requested to join or is a member
+    await client.query("BEGIN");
+
+    // Check if the user is already in forum_members.
     const checkQuery = `
       SELECT is_approved
       FROM forum_members
       WHERE forum_id = $1 AND user_id = $2;
     `;
-
-    const checkResult = await pool.query(checkQuery, [forumId, userId]);
+    const checkResult = await client.query(checkQuery, [forumId, userId]);
 
     if (checkResult.rows.length > 0) {
       const { is_approved } = checkResult.rows[0];
 
-      if (!is_approved) {
+      if (is_approved) {
+        await client.query("ROLLBACK");
+        res
+          .status(400)
+          .json({ message: "You are already a member of this forum." });
+        return;
+      } else {
+        await client.query("ROLLBACK");
         res.status(400).json({
           message:
             "You have already requested to join this forum. Please wait for approval.",
         });
         return;
       }
+    }
 
-      res
-        .status(400)
-        .json({ message: "You are already a member of this forum." });
+    // Insert a new row into forum_members with automatic approval.
+    const insertQuery = `
+      INSERT INTO forum_members (
+        id, forum_id, user_id, role, is_approved, joined_at, approved_at
+      ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      RETURNING forum_id, user_id, role, is_approved, joined_at, approved_at;
+    `;
+    const values = [id, forumId, userId, "member", true];
+    const insertResult = await client.query(insertQuery, values);
+
+    // Increment the members_count in the forums table.
+    const incrementMembersQuery = `
+      UPDATE forums
+      SET members_count = members_count + 1
+      WHERE id = $1;
+    `;
+    await client.query(incrementMembersQuery, [forumId]);
+
+    // Commit the transaction.
+    await client.query("COMMIT");
+
+    res.status(201).json({
+      message: "User successfully joined the forum.",
+      member: insertResult.rows[0],
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error following/joining forum:", error);
+    res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
+};
+
+export const unfollowForum = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  const { forumId } = req.params;
+  const userId = req.userId;
+
+  if (!userId || !forumId) {
+    res.status(400).json({ message: "User ID and Forum ID are required" });
+    return;
+  }
+
+  // Acquire a client from the pool to use a transaction.
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    // Check if the user is currently a member of the forum.
+    const checkQuery = `
+      SELECT *
+      FROM forum_members
+      WHERE forum_id = $1 AND user_id = $2;
+    `;
+    const checkResult = await client.query(checkQuery, [forumId, userId]);
+
+    if (checkResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      res.status(400).json({ message: "You are not a member of this forum." });
       return;
     }
 
-    // Add the user to forum_members
-    const query = `
-      INSERT INTO forum_members (
-        forum_id, user_id, role, is_approved, joined_at
-      ) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-      RETURNING forum_id, user_id, is_core, is_approved, joined_at;
+    // Remove the user's membership record.
+    const deleteQuery = `
+      DELETE FROM forum_members
+      WHERE forum_id = $1 AND user_id = $2;
     `;
+    await client.query(deleteQuery, [forumId, userId]);
 
-    const values = [forumId, userId, "core", false];
-    const result = await pool.query(query, values);
+    // Decrement the forum's member count.
+    const decrementMembersQuery = `
+      UPDATE forums
+      SET members_count = members_count - 1
+      WHERE id = $1;
+    `;
+    await client.query(decrementMembersQuery, [forumId]);
 
-    res.status(201).json({
-      message: "User requested to join forum",
-      member: result.rows[0],
+    // Commit the transaction.
+    await client.query("COMMIT");
+
+    res.status(200).json({
+      message: "User successfully unfollowed the forum.",
     });
-  } catch (err) {
-    console.error("Error following/joining forum:", err);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error unfollowing forum:", error);
     res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
   }
 };
 

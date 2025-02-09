@@ -108,7 +108,6 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
     }
 
     const userDetail = userWithDetailsResult.rows[0];
-    console.log(userDetail);
 
     // Return Supabase tokens directly for API usage
     res.json({

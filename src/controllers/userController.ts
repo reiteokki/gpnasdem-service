@@ -486,7 +486,7 @@ export const updateProfile = async (
         return;
       }
 
-      console.log("Supabase Auth user updated:", authUser);
+      // console.log("Supabase Auth user updated:", authUser);
     }
 
     // Fetch the updated user data with joined tables
