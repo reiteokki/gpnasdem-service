@@ -50,9 +50,9 @@ app.use("/api/comment", commentRoutes);
 app.use("/api/agenda", agendaRoutes);
 
 // Health check endpoint
-// app.get("/api/health", (req, res) => {
-//   res.status(200).json({ status: "OK", message: "API is running" });
-// });
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "OK", message: "API is running on Cloud" });
+});
 
 // 404 Handler
 app.use((req, res) => {

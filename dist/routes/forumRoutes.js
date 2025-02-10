@@ -1,0 +1,20 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const forumController_1 = require("../controllers/forumController");
+const authMiddleware_1 = require("../auth/authMiddleware");
+const fileUpload_1 = __importDefault(require("../middleware/fileUpload"));
+const router = (0, express_1.Router)();
+router.post("/", fileUpload_1.default, authMiddleware_1.authenticate, forumController_1.createForum);
+router.post("/:forumId/join", authMiddleware_1.authenticate, forumController_1.followForum);
+router.post("/:forumId/leave", authMiddleware_1.authenticate, forumController_1.unfollowForum);
+router.put("/:forumId/approve", authMiddleware_1.authenticate, forumController_1.approveJoinRequest);
+router.get("/", fileUpload_1.default, authMiddleware_1.authenticate, forumController_1.getAllForums);
+router.get("/joined", fileUpload_1.default, authMiddleware_1.authenticate, forumController_1.getJoinedForums);
+router.get("/:id", authMiddleware_1.authenticate, forumController_1.getForumById);
+router.put("/:id", fileUpload_1.default, authMiddleware_1.authenticate, forumController_1.editForum);
+router.delete("/:id", authMiddleware_1.authenticate, forumController_1.deleteForum);
+exports.default = router;
